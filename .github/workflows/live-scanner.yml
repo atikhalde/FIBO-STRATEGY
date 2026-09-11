@@ -1,0 +1,198 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# live-scanner.yml — run the FIBO NSE scanner on LIVE market data (yfinance)
+# ══════════════════════════════════════════════════════════════════════════════
+# Every 15 minutes during NSE hours (Mon–Fri, Asia/Kolkata):
+#   • builds the full-NSE universe (price ≥ ₹100, mcap > ₹1000 cr)
+#   • fetches closed daily history + TODAY's developing daily bar from Yahoo
+#   • runs the exact Pine engine → 0.0% and POC touches
+#   • sends a Telegram alert per touch (deduped via cached state)
+#   • writes the scan report to the run Summary + an artifact
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   TELEGRAM_BOT_TOKEN   from @BotFather
+#   TELEGRAM_CHAT_ID     your chat/group id (see README §2)
+#
+# GitHub runs schedules in UTC. NSE 09:15–15:30 IST = 03:45–10:00 UTC, so:
+#   45 3     * * 1-5   → 09:15 IST  opening scan
+#   0,15,30,45 4-9 * * 1-5 → 09:30–15:15 IST, every 15 min
+#   5 10     * * 1-5   → 15:35 IST  closing scan
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Live NSE scanner
+
+on:
+  schedule:
+    - cron: "45 3 * * 1-5"          # 09:15 IST — opening scan
+    - cron: "0,15,30,45 4-9 * * 1-5"  # 09:30–15:15 IST — every 15 min
+    - cron: "5 10 * * 1-5"          # 15:35 IST — closing scan
+  workflow_dispatch:
+    inputs:
+      history:
+        description: "Daily history for level calculation"
+        required: false
+        default: "5y"
+        type: string
+      limit:
+        description: "Scan only the first N symbols (blank = full universe)"
+        required: false
+        default: ""
+        type: string
+      workers:
+        description: "Download threads (4–12)"
+        required: false
+        default: "8"
+        type: string
+      dry_run:
+        description: "Dry run — compute + report, send no Telegram message"
+        required: false
+        default: false
+        type: boolean
+      no_refresh:
+        description: "Skip the live NSE-list refresh (use bundled nse_symbols.txt)"
+        required: false
+        default: false
+        type: boolean
+      skip_holiday_check:
+        description: "Run even if NSE is closed today (holiday/weekend test)"
+        required: false
+        default: false
+        type: boolean
+
+# Never two scans at once; queue the next slot instead of cancelling it.
+concurrency:
+  group: live-nse-scanner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Kolkata
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  scan:
+    name: FIBO scan (0.0% + POC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Check Telegram secrets
+        if: ${{ inputs.dry_run != true }}
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          missing=""
+          [ -z "$TG_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TG_CHAT" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — add them under Settings → Secrets and variables → Actions (see README §3b), or re-run with dry_run=true."
+            exit 1
+          fi
+          echo "Telegram secrets present ✅"
+
+      # Alert-dedup state + market-cap cache survive between runs, so a touch
+      # alerts once and 2000 market-cap quotes aren't re-fetched every 15 min.
+      - name: Restore scan state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            state
+            cache
+          key: fibo-scan-state-${{ github.run_id }}
+          restore-keys: |
+            fibo-scan-state-
+
+      - name: Run live scan
+        id: scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HISTORY: ${{ inputs.history || '5y' }}
+          LIMIT: ${{ inputs.limit || '' }}
+          WORKERS: ${{ inputs.workers || '8' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          NO_REFRESH: ${{ inputs.no_refresh || false }}
+          SKIP_HOLIDAY_CHECK: ${{ inputs.skip_holiday_check || false }}
+        run: |
+          echo "### 🕘 Scan started $(date '+%d-%b-%Y %H:%M:%S %Z') (trigger: ${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
+
+          # Cron cannot know NSE holidays — skip them instead of re-reporting
+          # the previous trading day's levels.
+          if [ "$SKIP_HOLIDAY_CHECK" != "true" ]; then
+            if ! python scanner.py --market-day-check; then
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              {
+                echo ""
+                echo "⏭️ **Skipped — NSE is not trading right now** (weekend or market holiday)."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          ARGS=(--mode once --include-today
+                --history "$HISTORY"
+                --workers "$WORKERS"
+                --report-file scan_report.txt)
+          if [ -n "$LIMIT" ]; then
+            ARGS+=(--limit "$LIMIT")
+          fi
+          if [ "$NO_REFRESH" = "true" ]; then
+            ARGS+=(--no-refresh)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS+=(--dry-run)
+            echo "🧪 dry run — no Telegram messages will be sent"
+          else
+            ARGS+=(--telegram --summary)
+          fi
+
+          echo "python scanner.py ${ARGS[*]}"
+          python scanner.py "${ARGS[@]}"
+
+      - name: Publish scan report
+        if: ${{ always() }}
+        run: |
+          {
+            echo ""
+            echo '```text'
+            if [ -f scan_report.txt ]; then
+              cat scan_report.txt
+            else
+              echo "(no report produced — see the step log above)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fibo-scan-${{ github.run_id }}
+          path: scan_report.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save scan state
+        if: ${{ always() && steps.scan.outputs.skipped != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            state
+            cache
+          key: fibo-scan-state-${{ github.run_id }}

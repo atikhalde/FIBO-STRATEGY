@@ -6,6 +6,10 @@
 #   python scanner.py --mode once   single EOD-style scan of last daily bar
 #   python scanner.py --mode live   live loop in market hours (9:15–15:30 IST)
 #
+# CI helpers (see .github/workflows/live-scanner.yml):
+#   --report-file PATH        write the scan report to a file (Actions summary)
+#   --market-day-check        exit 0 = NSE trading today, 10 = holiday/weekend
+#
 # Live-loop design (daily timeframe, exact Pine semantics):
 #   • Closed daily history cached (refreshed every 30 min / on new day).
 #   • Each poll: today's developing daily bar (from 1m bars) is merged onto
@@ -128,6 +132,8 @@ def evaluate(symbols: List[str], daily: Dict[str, pd.DataFrame],
     today = datetime.now(IST).date().isoformat()
     hits_000: List[tuple] = []
     hits_poc: List[tuple] = []
+    seen_000: List[tuple] = []   # touched, but already alerted earlier today
+    seen_poc: List[tuple] = []
     errors = 0
 
     for sym in symbols:
@@ -145,40 +151,117 @@ def evaluate(symbols: List[str], daily: Dict[str, pd.DataFrame],
             continue
 
         anchor_key = res["swing_date_prev"] if res.get("touched_000") == "prev-bar" else res["swing_date"]
-        if res["touch_000"] and should_alert(state, sym, "000", anchor_key, today):
-            hits_000.append((sym, res))
-            msg = format_touch_000(sym, res)
-            log.info("🎯 %s touched 0.0%% @ %s", sym, res["level_000"])
-            if telegram and not dry_run:
-                send_telegram(token, chat, msg)
-                time.sleep(0.4)  # Bot API rate kindness
-        if res["touch_poc"] and should_alert(state, sym, "POC", res["swing_date"], today):
-            hits_poc.append((sym, res))
-            msg = format_touch_poc(sym, res)
-            log.info("🔥 %s touched POC @ %s", sym, res["poc"])
-            if telegram and not dry_run:
-                send_telegram(token, chat, msg)
-                time.sleep(0.4)
+        if res["touch_000"]:
+            if should_alert(state, sym, "000", anchor_key, today):
+                hits_000.append((sym, res))
+                msg = format_touch_000(sym, res)
+                log.info("🎯 %s touched 0.0%% @ %s", sym, res["level_000"])
+                if telegram and not dry_run:
+                    send_telegram(token, chat, msg)
+                    time.sleep(0.4)  # Bot API rate kindness
+            else:
+                seen_000.append((sym, res))
+        if res["touch_poc"]:
+            if should_alert(state, sym, "POC", res["swing_date"], today):
+                hits_poc.append((sym, res))
+                msg = format_touch_poc(sym, res)
+                log.info("🔥 %s touched POC @ %s", sym, res["poc"])
+                if telegram and not dry_run:
+                    send_telegram(token, chat, msg)
+                    time.sleep(0.4)
+            else:
+                seen_poc.append((sym, res))
 
     return {"n": len(symbols), "hits_000": hits_000, "hits_poc": hits_poc,
+            "seen_000": seen_000, "seen_poc": seen_poc,
             "errors": errors, "state": state}
 
 
-def print_report(stats: dict) -> None:
-    print("\n" + "=" * 72)
-    print(f"FIBO SCAN — {now_ist()} | universe={stats['n']} "
-          f"errors={stats['errors']}")
-    print("=" * 72)
+def build_report(stats: dict) -> str:
+    """Render the scan report as text (same text for console, file and CI)."""
+    out: List[str] = []
+    out.append("")
+    out.append("=" * 72)
+    out.append(f"FIBO SCAN — {now_ist()} | universe={stats['n']} "
+               f"errors={stats['errors']}")
+    out.append("=" * 72)
     for title, hits, key in (("TOUCHED 0.0% (swing anchor)", stats["hits_000"], "level_000"),
                              ("TOUCHED POC", stats["hits_poc"], "poc")):
-        print(f"\n── {title}: {len(hits)} ──")
+        out.append(f"\n── {title}: {len(hits)} ──")
         for sym, r in hits:
             ld = r["last_date"].date() if r["last_date"] is not None else "?"
-            print(f"  {sym:16s} {key}={r[key]:10.2f}  CMP={r['close']:10.2f}  "
-                  f"bar={ld}  {r['direction'][:9]}")
+            out.append(f"  {sym:16s} {key}={r[key]:10.2f}  CMP={r['close']:10.2f}  "
+                       f"bar={ld}  {r['direction'][:9]}")
     if not stats["hits_000"] and not stats["hits_poc"]:
-        print("\n  (no touches on this scan)")
-    print()
+        out.append("\n  (no NEW touches on this scan)")
+
+    # Touched but already alerted earlier today: still worth showing on a
+    # scheduled run's summary page, so a quiet report doesn't look like a
+    # market that is nowhere near a level.
+    seen = (("0.0%", stats.get("seen_000", []), "level_000"),
+            ("POC", stats.get("seen_poc", []), "poc"))
+    n_seen = sum(len(v) for _, v, _ in seen)
+    if n_seen:
+        out.append(f"\n── ALSO ON A LEVEL, ALERTED EARLIER TODAY (deduped): {n_seen} ──")
+        for label, hits, key in seen:
+            for sym, r in hits:
+                out.append(f"  {sym:16s} {label:5s}={r[key]:10.2f}  "
+                           f"CMP={r['close']:10.2f}")
+    out.append("")
+    return "\n".join(out)
+
+
+def print_report(stats: dict) -> None:
+    print(build_report(stats), end="")
+
+
+def write_report(path, stats: dict) -> Optional[Path]:
+    """Write the report to `path` (parents created). Returns the path or None."""
+    try:
+        p = Path(path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(build_report(stats), encoding="utf-8")
+        log.info("report written → %s", p)
+        return p
+    except Exception as e:  # noqa: BLE001 — a report failure must not fail a scan
+        log.warning("could not write report %s: %s", path, e)
+        return None
+
+
+# ── market-day guard (used by scheduled/CI runs) ──────────────────────────────
+
+INDEX_PROBES = ("^NSEI", "RELIANCE.NS")
+
+
+def market_day_check(now: Optional[datetime] = None):
+    """
+    (ok, reason) — is NSE probably trading right now?
+
+    True when it is a weekday AND the newest daily bar Yahoo has is dated
+    today (IST). Cron expressions cannot know NSE holidays, so scheduled runs
+    call this first and skip the scan on a holiday instead of re-reporting the
+    previous trading day's levels. If Yahoo is unreachable we say "ok" and let
+    the scan itself decide — missing a real session is worse than a dry one.
+    """
+    now = now or datetime.now(IST)
+    status = market_status(now)
+    if status == "holiday-weekend":
+        return False, f"{status} — {now:%a %d-%b-%Y} IST"
+    for probe in INDEX_PROBES:
+        try:
+            frame = fetch_daily_batch([probe], period="1mo",
+                                      max_workers=1).get(probe)
+        except Exception as e:  # noqa: BLE001
+            log.debug("market-day probe %s failed: %s", probe, e)
+            frame = None
+        if frame is None or len(frame) == 0:
+            continue
+        last = pd.Timestamp(frame.index[-1]).date()
+        if last == now.date():
+            return True, f"{probe} newest daily bar = {last} = today (IST)"
+        return False, (f"{probe} newest daily bar = {last}, today = "
+                       f"{now.date()} → NSE holiday or data lag")
+    return True, "no price data reachable — running the scan anyway"
 
 
 # ── modes ─────────────────────────────────────────────────────────────────────
@@ -205,8 +288,13 @@ def run_once(args) -> int:
     state = load_state()
     stats = evaluate(symbols, daily, partials, telegram=args.telegram,
                      token=token, chat=chat, state=state, dry_run=args.dry_run)
-    save_state(stats["state"])
+    if args.dry_run:
+        log.info("dry-run: alert state NOT persisted (real runs stay armed)")
+    else:
+        save_state(stats["state"])
     print_report(stats)
+    if getattr(args, "report_file", None):
+        write_report(args.report_file, stats)
     if args.telegram and args.summary:
         send_telegram(token, chat, format_scan_summary(
             stats["n"], len(stats["hits_000"]), len(stats["hits_poc"]), stats["errors"]))
@@ -257,6 +345,8 @@ def run_live(args) -> int:
                              chat=chat, state=state)
             save_state(stats["state"])
             print_report(stats)
+            if getattr(args, "report_file", None):
+                write_report(args.report_file, stats)
             send_telegram(token, chat, "🌙 <b>FIBO live scanner sleeping</b> — market closed. "
                                       f"EOD touches today: 0.0%={len(stats['hits_000'])}, "
                                       f"POC={len(stats['hits_poc'])}. {now_ist()}")
@@ -309,10 +399,19 @@ def main(argv=None) -> int:
     ap.add_argument("--poll-sec", type=int, default=300, help="(live) seconds between polls")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--env-file", default="config.env")
+    ap.add_argument("--report-file", default=None, metavar="PATH",
+                    help="also write the scan report to PATH (CI summary page)")
+    ap.add_argument("--market-day-check", action="store_true",
+                    help="exit 0 if NSE is trading today (IST), 10 if not; no scan")
     ap.add_argument("--send-test", action="store_true", help="send a Telegram test then exit")
     args = ap.parse_args(argv)
 
     load_env_file(ROOT / args.env_file)
+
+    if args.market_day_check:
+        ok, reason = market_day_check()
+        print(("TRADING DAY ✅  " if ok else "NOT A TRADING DAY ⏭️  ") + reason)
+        return 0 if ok else 10
 
     if args.send_test:
         ok = send_telegram(os.getenv("TELEGRAM_BOT_TOKEN", ""),
