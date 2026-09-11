@@ -1,0 +1,6 @@
+# FIBO-STRATEGY — Swing Fibonacci Arcs & Volume Profile Scanner (NSE)
+# Python port of BigBeluga's TradingView indicator + live Telegram scanner.
+yfinance>=0.2.30
+pandas>=1.5
+numpy>=1.24
+requests>=2.28
