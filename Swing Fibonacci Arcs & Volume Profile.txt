@@ -1,0 +1,328 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © BigBeluga
+
+//@version=6
+indicator("Swing Fibonacci Arcs & Volume Profile [BigBeluga]", overlay = true, max_boxes_count = 500, max_polylines_count = 100, max_lines_count = 50, max_labels_count = 200, explicit_plot_zorder = true, max_bars_back = 5000)
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+swingLength = input.int(70, "Swing Structure", minval = 5, maxval = 200, tooltip = "Determines how significant a high or low must be.", group = "Swings Settings")
+color1      = input.color(color.teal, "Bull Swing Color", group = "Swings Settings", tooltip = "Color for confirmed bullish swing lines.")
+color2      = input.color(color.red, "Bear Swing Color", group = "Swings Settings", tooltip = "Color for confirmed bearish swing lines.")
+rtLineColor = input.color(color.gray, "Real-time Swing Color", group = "Swings Settings", tooltip = "Color for the active, unconfirmed real-time swing line.")
+
+xScale      = input.float(1.5, "Horizontal Scale (X)", minval = 0.1, maxval = 10.0, step = 0.1, group = "Fibonacci Arcs Settings", tooltip = "Scales the horizontal expansion of the arcs.")
+yScale      = input.float(1.5, "Vertical Scale (Y)", minval = 0.1, maxval = 10.0, step = 0.1, group = "Fibonacci Arcs Settings", tooltip = "Scales the vertical expansion of the arcs.")
+numSegs     = input.int(25, "Arc Resolution (Segments)", minval = 10, maxval = 100, group = "Fibonacci Arcs Settings", tooltip = "Determines smoothness and segment count of the drawn arcs.")
+polyWidth   = input.int(1, "Arcs Line Width", minval = 0, maxval = 100, group = "Fibonacci Arcs Settings", tooltip = "Line thickness for the arc borders.")
+
+fillTransp  = input.int(80, "Fill Transparency", minval = 0, maxval = 100, group = "Fibonacci Arcs Style", tooltip = "Transparency level for the arc band fills.")
+
+show000     = input.bool(true, "Show 0.0%", group="Fibonacci Arcs Style", inline = "1")
+col000      = input.color(color.gray, "", group="Fibonacci Arcs Style", inline = "1", tooltip = "Style and visibility settings for the 0.0% level.")
+
+show236     = input.bool(true, "Show 23.6%", group="Fibonacci Arcs Style", inline = "2")
+col236      = input.color(color.blue, "", group="Fibonacci Arcs Style", inline = "2")
+fill236     = input.bool(true, "Fill",  group="Fibonacci Arcs Style", inline = "2", tooltip = "Style, color, and fill options for the 23.6% level.")
+
+show382     = input.bool(true, "Show 38.2%", group="Fibonacci Arcs Style", inline = "3")
+col382      = input.color(color.green, "", group="Fibonacci Arcs Style", inline = "3")
+fill382     = input.bool(false, "Fill",  group="Fibonacci Arcs Style", inline = "3", tooltip = "Style, color, and fill options for the 38.2% level.")
+
+show500     = input.bool(true, "Show 50.0%", group="Fibonacci Arcs Style", inline = "4")
+col500      = input.color(color.teal, "", group="Fibonacci Arcs Style", inline = "4")
+fill500     = input.bool(false, "Fill",  group="Fibonacci Arcs Style", inline = "4", tooltip = "Style, color, and fill options for the 50.0% level.")
+
+show618     = input.bool(true, "Show 61.8%", group="Fibonacci Arcs Style", inline = "5")
+col618      = input.color(color.yellow, "", group="Fibonacci Arcs Style", inline = "5")
+fill618     = input.bool(false, "Fill",  group="Fibonacci Arcs Style", inline = "5", tooltip = "Style, color, and fill options for the 61.8% level.")
+
+show786     = input.bool(true, "Show 78.6%", group="Fibonacci Arcs Style", inline = "6")
+col786      = input.color(color.orange, "", group="Fibonacci Arcs Style", inline = "6")
+fill786     = input.bool(true, "Fill",  group="Fibonacci Arcs Style", inline = "6", tooltip = "Style, color, and fill options for the 78.6% level.")
+
+show100     = input.bool(true, "Show 100.0%", group="Fibonacci Arcs Style", inline = "7")
+col100      = input.color(color.red, "", group="Fibonacci Arcs Style", inline = "7")
+fill100     = input.bool(false, "Fill",  group="Fibonacci Arcs Style", inline = "7", tooltip = "Style, color, and fill options for the 100.0% level.")
+
+fill000     = true
+
+showVP      = input.bool(true, "Show Volume Profile", group = "Volume Profile", tooltip = "Toggles the visibility of the Volume Profile.")
+vpWidth     = input.int(35, "Profile Max Width (Bars)", minval = 5, maxval = 150, group = "Volume Profile", tooltip = "Sets the maximum horizontal width of the volume profile histogram.")
+colVPStart  = input.color(color.new(color.blue, 80), "Gradient Low Color", group = "Volume Profile", tooltip = "Starting color for low volume bins.")
+colVPEnd    = input.color(color.new(color.blue, 0), "Gradient High Color", group = "Volume Profile", tooltip = "Ending color for high volume bins.")
+showPOC     = input.bool(true, "Show POC Line", group = "Volume Profile", inline = "poc", tooltip = "Toggles visibility and color of the Point of Control (POC) line.")
+colPOC      = input.color(color.yellow, "", group = "Volume Profile", inline = "poc")
+// }
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+atr = ta.atr(100)*0.3
+
+var Hi = 0
+var Hv = high
+var Li = 0
+var Lv = low
+var direction = false
+
+H = ta.highest(high, swingLength)
+L = ta.lowest(low, swingLength)
+
+if high == H
+    Hi := bar_index
+    Hv := high
+    direction := true
+
+if low == L
+    Li := bar_index
+    Lv := low
+    direction := false
+
+
+var float swingPrice = float(na)
+var int swingIndex = int(na)
+
+var line confirmedLine = na
+var int lockedX1 = na
+var float lockedY1 = na
+var int lockedX2 = na
+var float lockedY2 = na
+var bool isSwingLow = false
+
+var changeY = high
+var changeX = bar_index
+
+
+if direction != direction[1]
+    if not na(confirmedLine)
+        line.delete(confirmedLine)
+        
+    if direction
+        changeY := high
+        swingPrice := Lv
+        swingIndex := Li
+        lockedX1 := Li
+        lockedY1 := Lv
+        lockedX2 := Hi[1]
+        lockedY2 := Hv[1]
+        isSwingLow := true
+        confirmedLine := line.new(lockedX1, lockedY1, lockedX2, lockedY2, color = color2, width=2)
+    else
+        changeY := low
+        swingIndex := Hi
+        swingPrice := Hv
+        lockedX1 := Hi
+        lockedY1 := Hv
+        lockedX2 := Li[1]
+        lockedY2 := Lv[1]
+        isSwingLow := false
+        confirmedLine := line.new(lockedX1, lockedY1, lockedX2, lockedY2, color = color1, width=2)
+
+var line rtLine = na
+
+if not direction and low == L and low <= changeY
+    changeY := low 
+    changeX := bar_index 
+
+if direction and high == H and high >= changeY
+    changeY := high 
+    changeX := bar_index 
+
+if barstate.islast and not na(swingIndex)
+    line.delete(rtLine)
+    rtLine := line.new(swingIndex, swingPrice, changeX, changeY, color = rtLineColor, style = line.style_dashed, width = 1)
+// }
+
+// ＰＬＯＴ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+var polyline[] arcPolylines = array.new<polyline>()
+var label[] arcLabels = array.new<label>()
+var box[] vpBoxes = array.new<box>()
+
+createArcBandAndLabel(int cx, float cy, float prevRx, float prevRy, float rx, float ry, bool upward, color col, string txt, bool doFill) =>
+    float startAngle = 0.0
+    float endAngle   = math.pi
+    float angleStep  = (endAngle - startAngle) / numSegs
+    
+    if doFill and rx > 0 and ry > 0
+        array<chart.point> fillPts = array.new<chart.point>()
+        for i = 0 to numSegs
+            float a = startAngle + i * angleStep
+            int xCoord = int(math.min(cx + rx * math.cos(a), bar_index + 500))
+            float yCoord = upward ? (cy + ry * math.sin(a)) : (cy - ry * math.sin(a))
+            array.push(fillPts, chart.point.from_index(xCoord, yCoord))
+            
+        if prevRx >= 0 and prevRy >= 0
+            for i = numSegs to 0
+                float a = startAngle + i * angleStep
+                int xCoord = int(math.min(cx + prevRx * math.cos(a), bar_index + 500))
+                float yCoord = upward ? (cy + prevRy * math.sin(a)) : (cy - prevRy * math.sin(a))
+                array.push(fillPts, chart.point.from_index(xCoord, yCoord))
+        else if prevRx == 0 and prevRy == 0
+            array.push(fillPts, chart.point.from_index(cx, cy))
+            
+        polyline fillPl = polyline.new(fillPts, curved = false, line_color = color(na), fill_color = color.new(col, fillTransp))
+        array.push(arcPolylines, fillPl)
+
+    if rx > 0 and ry > 0
+        array<chart.point> borderPts = array.new<chart.point>()
+        for i = 0 to numSegs
+            float a = startAngle + i * angleStep
+            int xCoord = int(math.min(cx + rx * math.cos(a), bar_index + 500))
+            float yCoord = upward ? (cy + ry * math.sin(a)) : (cy - ry * math.sin(a))
+            array.push(borderPts, chart.point.from_index(xCoord, yCoord))
+            
+        polyline borderPl = polyline.new(borderPts, curved = false, line_color = col, line_width = polyWidth, fill_color = color(na))
+        array.push(arcPolylines, borderPl)
+
+    int apexX = int(math.min(cx, bar_index + 500))
+    float apexY = upward ? (cy + ry) : (cy - ry)
+    
+    label lbl = label.new(apexX, apexY, txt, xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.black, 100), textcolor=col, style=upward ? label.style_label_down : label.style_label_up, size=size.normal)
+    array.push(arcLabels, lbl)
+
+drawVolumeProfile() =>
+    line newPocLine = na
+    var label pocLabel = na
+
+    if not na(pocLabel)
+        label.delete(pocLabel)
+        pocLabel := na
+    
+    if not na(swingIndex) and barstate.islast and showVP
+        int startBar = math.min(swingIndex, bar_index)
+        int endBar = bar_index
+        
+        if endBar > startBar
+            float pMin = high
+            float pMax = low
+            for i = startBar to endBar
+                pMin := math.min(pMin, low[bar_index - i])
+                pMax := math.max(pMax, high[bar_index - i])
+                
+            if pMax > pMin
+                float currentAtr = nz(atr, (pMax - pMin) / 50.0)
+                float priceSpan  = pMax - pMin
+                
+                float rawRows = priceSpan / (currentAtr * 0.5)
+                int calculatedRows = int(math.min(math.max(rawRows, 10.0), 100.0))
+                
+                float rowHeight = priceSpan / calculatedRows
+                float[] volBins = array.new<float>(calculatedRows, 0.0)
+                
+                for i = startBar to endBar
+                    float bClose = close[bar_index - i]
+                    float bVol   = nz(volume[bar_index - i], 1.0)
+                    
+                    for r = 0 to calculatedRows - 1
+                        float rLow = pMin + r * rowHeight
+                        float rHigh = rLow + rowHeight
+                        float rMid = rLow + (rowHeight / 2.0)
+                        
+                        float dist = math.abs(bClose - rMid)
+                        float proximityWindow = rowHeight * 2
+                        
+                        if dist <= proximityWindow
+                            float weight = math.max(0.0, 1.0 - (dist / proximityWindow))
+                            array.set(volBins, r, array.get(volBins, r) + (bVol * weight))
+                            
+                float maxVol = 0.0
+                int pocIndex = 0
+                for r = 0 to calculatedRows - 1
+                    float v = array.get(volBins, r)
+                    if v > maxVol
+                        maxVol := v
+                        pocIndex := r
+                        
+                if maxVol > 0
+                    int baseX = swingIndex
+                    
+                    for r = 0 to calculatedRows - 1
+                        float rowVol = array.get(volBins, r)
+                        if rowVol >= 0
+                            int barLen = int(math.round((rowVol / maxVol) * vpWidth))
+                            float rLow = pMin + r * rowHeight
+                            float rHigh = rLow + rowHeight
+                            
+                            color binColor = color.from_gradient(rowVol, 0.0, maxVol, colVPStart, colVPEnd)
+                            
+                            box b = box.new(left = baseX, top = rHigh, right = baseX + barLen, bottom = rLow, 
+                                          border_color = binColor, 
+                                          border_width = 1, 
+                                          bgcolor = color.new(binColor, 100), 
+                                          xloc = xloc.bar_index)
+                            array.push(vpBoxes, b)
+                    
+                    if showPOC
+                        float pocPrice = pMin + (pocIndex + 0.5) * rowHeight
+                        float pocRowVol = array.get(volBins, pocIndex)
+                        int pocBarLen = int(math.round((pocRowVol / maxVol) * vpWidth))
+                        newPocLine := line.new(baseX + pocBarLen, pocPrice, bar_index, pocPrice, color = colPOC, width = 2)
+                        
+                        pocLabel := label.new(bar_index, pocPrice, str.tostring(pocRowVol, format.volume), xloc = xloc.bar_index, yloc = yloc.price, color = color(na), textcolor = colPOC, style = label.style_label_left, size = size.small)
+                    
+    newPocLine
+
+if barstate.islast and not na(swingIndex)
+    float rawDx = math.abs(changeX - swingIndex)
+    float rawDy = math.abs(changeY - swingPrice)
+    
+    float minDx = 70.0                      
+    float minDy = math.abs(lockedY1 - lockedY2)      
+    
+    float dx = math.max(rawDx, minDx) * xScale
+    float dy = math.max(rawDy, minDy) * yScale 
+    
+    if rawDx > 0 and rawDy > 0
+        if array.size(arcPolylines) > 0
+            for i = 0 to array.size(arcPolylines) - 1
+                polyline.delete(array.get(arcPolylines, i))
+            array.clear(arcPolylines)
+
+        if array.size(arcLabels) > 0
+            for i = 0 to array.size(arcLabels) - 1
+                label.delete(array.get(arcLabels, i))
+            array.clear(arcLabels)
+            
+        float r0_x = 0,               r0_y = 0
+        float r23_x = dx * 0.236,     r23_y = dy * 0.236
+        float r38_x = dx * 0.382,     r38_y = dy * 0.382
+        float r50_x = dx * 0.500,     r50_y = dy * 0.500
+        float r61_x = dx * 0.618,     r61_y = dy * 0.618
+        float r78_x = dx * 0.786,     r78_y = dy * 0.786
+        float r100_x = dx * 1.000,    r100_y = dy * 1.000
+
+        bool isUpward = (changeY >= swingPrice)
+
+        if show236
+            createArcBandAndLabel(swingIndex, swingPrice, r0_x, r0_y, r23_x, r23_y, isUpward, col236, "23.6%", fill236)
+
+        if show382
+            createArcBandAndLabel(swingIndex, swingPrice, r23_x, r23_y, r38_x, r38_y, isUpward, col382, "38.2%", fill382)
+
+        if show500
+            createArcBandAndLabel(swingIndex, swingPrice, r38_x, r38_y, r50_x, r50_y, isUpward, col500, "50.0%", fill500)
+
+        if show618
+            createArcBandAndLabel(swingIndex, swingPrice, r50_x, r50_y, r61_x, r61_y, isUpward, col618, "61.8%", fill618)
+
+        if show786
+            createArcBandAndLabel(swingIndex, swingPrice, r61_x, r61_y, r78_x, r78_y, isUpward, col786, "78.6%", fill786)
+
+        if show100
+            createArcBandAndLabel(swingIndex, swingPrice, r78_x, r78_y, r100_x, r100_y, isUpward, col100, "100.0%", fill100)
+            
+        if show000
+            createArcBandAndLabel(swingIndex, swingPrice, -1, -1, r0_x, r0_y, isUpward, col000, "0.0%", fill000)
+
+var line pocLine = na
+
+if barstate.islast
+    if not na(pocLine)
+        line.delete(pocLine)
+    
+    if array.size(vpBoxes) > 0
+        for i = 0 to array.size(vpBoxes) - 1
+            box.delete(array.get(vpBoxes, i))
+        array.clear(vpBoxes)
+        
+    pocLine := drawVolumeProfile()
+// }
