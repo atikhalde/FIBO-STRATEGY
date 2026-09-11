@@ -87,7 +87,8 @@ python scanner.py --mode live --poll-sec 300
 ```
 
 Useful flags: `--min-price 100 --min-mcap-cr 1000 --limit N --no-refresh
---include-today --dry-run --workers 4 --history 5y --env-file config.env`
+--include-today --dry-run --workers 4 --history 5y --env-file config.env
+--report-file PATH --market-day-check`
 
 ### How LIVE mode works on the Daily timeframe
 
@@ -96,7 +97,55 @@ Useful flags: `--min-price 100 --min-mcap-cr 1000 --limit N --no-refresh
   TradingView’s realtime daily bar) is merged onto history and the full Pine engine re-runs —
   so levels always match your chart *right now*.
 - Each touch alerts **once**, then re-arms on a **new swing** or a **new trading day**
-  (state in `state/alert_state.json`). No spam.
+  (state in `state/alert_state.json`). No spam. The dedup key is the **IST calendar day**, so a
+  level that is touched all session alerts once that day, not 26 times.
+
+---
+
+## 3b. Run it on GitHub Actions (no VPS needed)
+
+`.github/workflows/live-scanner.yml` runs the scanner on **live Yahoo Finance data** during NSE
+hours, so nothing has to stay switched on at your end.
+
+**Schedule (Mon–Fri, 26 runs/day, IST):**
+
+| Cron (UTC) | IST | What |
+|---|---|---|
+| `45 3 * * 1-5` | 09:15 | opening scan |
+| `0,15,30,45 4-9 * * 1-5` | 09:30 → 15:15 | every 15 min |
+| `5 10 * * 1-5` | 15:35 | closing scan |
+
+Each run: builds the universe → fetches closed daily history **+ today's developing bar** →
+runs the Pine engine → Telegram alert per new touch → writes the report to the run's
+**Summary** tab and uploads it as an artifact (`fibo-scan-<run-id>`, kept 7 days).
+
+**Setup (once):**
+
+1. Merge the workflow to your **default branch** — GitHub only fires `schedule` triggers from
+   the default branch, so it will not run while it sits on a feature branch.
+2. Add the two secrets under **Settings → Secrets and variables → Actions**:
+   `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (same values as `config.env`).
+3. Optional smoke test: **Actions → Live NSE scanner → Run workflow** with
+   `dry_run = true`, `limit = 20`, `skip_holiday_check = true`. A dry run sends nothing and
+   does not write alert state, so it cannot swallow a later real alert.
+
+**Behaviour worth knowing:**
+
+- **NSE holidays:** cron cannot know them, so each run first calls
+  `python scanner.py --market-day-check` (exit `0` = trading, `10` = weekend/holiday) and skips
+  the scan instead of re-reporting the previous session's levels. If Yahoo is unreachable the
+  check fails *open* and the scan runs anyway — missing a real session is worse than a dry one.
+- **State across runs:** `state/` (alert dedup) and `cache/` (market caps) are saved to the
+  Actions cache and restored by the next run, so a touch alerts once and 2000 market-cap quotes
+  aren't re-pulled every 15 minutes. GitHub evicts cache entries unused for 7 days, so after a
+  long break the first run may re-alert once.
+- **Runs never overlap:** `concurrency` queues the next slot instead of cancelling it. Job
+  timeout is 20 min.
+- **Runtime is unmeasured here** (this sandbox cannot reach Yahoo). A full-universe run has to
+  pull 5y daily bars and 1m partials for ~1000+ symbols; if runs start hitting the 20-min
+  timeout, widen the cron to every 30 min (`0,30 4-9 * * 1-5`) or pass `--no-refresh`.
+- Manual triggers expose `history`, `limit`, `workers`, `dry_run`, `no_refresh`,
+  `skip_holiday_check`.
 
 ---
 
@@ -111,6 +160,7 @@ Useful flags: `--min-price 100 --min-mcap-cr 1000 --limit N --no-refresh
 | `alerts.py` | Telegram send + the 2 alert message templates |
 | `backtest_verify.py` | 6 offline Pine-equivalence proofs (naive-loop VP, ATR, anchors, touch, history) |
 | `nse_symbols.txt` | 520-symbol NSE seed list (auto-refreshed live from NSE/mirrors when reachable) |
+| `.github/workflows/live-scanner.yml` | Scheduled live scanner on GitHub Actions (NSE hours, every 15 min) |
 
 ---
 
@@ -121,7 +171,8 @@ Useful flags: `--min-price 100 --min-mcap-cr 1000 --limit N --no-refresh
   broker-agnostic: point `datafeed.py` at Kite/Dhan/Upstox later without touching alert logic.
 - First run builds the mcap cache (~10–20 min for the full universe); later runs reuse it for 7 days.
 - Run `live` mode on a VPS/computer that stays on during market hours (9:15–15:30 IST, Mon–Fri).
-  Outside hours it EOD-scans once and sleeps.
+  Outside hours it EOD-scans once and sleeps. Don't have one? Use the
+  GitHub Actions schedule instead (§3b) — it runs on GitHub's runners during market hours.
 - Symbols that fail to download are skipped + logged — a few stale seeds are harmless.
 
 ## 6. Disclaimer
