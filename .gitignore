@@ -5,3 +5,5 @@ cache/
 state/
 *.log
 .venv/
+reports/*.pdf
+!reports/fibo_historical_backtest_report.pdf
