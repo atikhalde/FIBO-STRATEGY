@@ -2,11 +2,22 @@
 # backtest_engine.py — Core historical backtest scanner & performance analyzer
 # ══════════════════════════════════════════════════════════════════════════════
 # Implements causal historical scanning for:
-#   1. 0.0% touches (swing anchor support/resistance tests, including prior-bar)
+#   1. 0.0% touches (swing anchor support tests, including prior-bar anchor)
 #   2. POC touches (Volume Profile Point of Control tests)
 #   3. Backtest periods: 1yr, 2yr, 3yr, 5yr
 #   4. Comprehensive stock performance metrics (trade simulation, win rate,
 #      profit factor, forward returns +1d/+3d/+5d/+10d/+20d, MFE, MAE, max DD)
+#
+# LIVE-PARITY RULES (the backtest must match scanner.py + engine.py exactly):
+#   • Signal detection is identical to engine.scan_last_bar(): 0.0% touch of
+#     the current OR prior-bar drawn anchor, POC wick touch, zero tolerance.
+#   • BULL SIDE ONLY: only signals on a bullish leg (anchor = swing LOW) are
+#     evaluated — every simulated trade is a LONG. Bear-leg (SHORT) trades are
+#     NOT part of the live strategy and are never generated here.
+#   • NO trade cooldown: the live scanner re-arms on every new trading day,
+#     so on daily bars every qualifying touch fires (cooldown_bars defaults 0).
+#   • Touch counts in reports count bull-leg touches only, so every published
+#     number refers to the same bull-side signal set as the trade log.
 # ══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -300,9 +311,16 @@ def simulate_stock_touches(scan_df: pd.DataFrame, symbol: str,
                            target_pct: float = 4.0,
                            stop_pct: float = 2.0,
                            max_hold_days: int = 10,
-                           cooldown_bars: int = 3) -> Tuple[List[TradeRecord], List[dict]]:
+                           cooldown_bars: int = 0) -> Tuple[List[TradeRecord], List[dict]]:
     """
     Simulate trades and calculate forward performance for all qualifying touches.
+
+    LIVE-PARITY (bull side only):
+      • Only BULL-leg bars (direction_bull=True, anchor = swing LOW) are
+        evaluated — exactly the signals the live scanner acts on. All trades
+        are LONG; bear-leg bars are skipped entirely (no SHORT simulation).
+      • cooldown_bars defaults to 0: the live scanner re-arms each new trading
+        day, so on daily bars every qualifying touch may fire.
     """
     trades: List[TradeRecord] = []
     all_touch_events: List[dict] = []
@@ -326,6 +344,16 @@ def simulate_stock_touches(scan_df: pd.DataFrame, symbol: str,
         row = scan_df.iloc[i]
         t000 = bool(row["touch_000"])
         tpoc = bool(row["touch_poc"])
+
+        # ── BULL SIDE ONLY (live-scanner rules) ────────────────────────────────
+        # The live strategy is long-only: on a bull leg the 0.0% anchor is a
+        # swing LOW (support pullback → LONG) and the POC is leg support.
+        # Bear-leg bars (anchor = swing HIGH / resistance, former SHORT trades)
+        # are not part of the strategy — skip before counting or trading.
+        # Note the direction here is the engine's post-bar state, identical to
+        # what engine.scan_last_bar() reports on that bar (flip bars included).
+        if not bool(row["direction_bull"]):
+            continue
 
         fired_000 = False
         fired_poc = False
@@ -356,8 +384,9 @@ def simulate_stock_touches(scan_df: pd.DataFrame, symbol: str,
             level_px = row["poc"]
 
         swing_dir = "BULL" if row["direction_bull"] else "BEAR"
-        # In Bull leg: anchor is swing LOW, touch is support pullback -> LONG
-        # In Bear leg: anchor is swing HIGH, touch is resistance rally -> SHORT
+        # Bull-side only: every simulated trade is a LONG on a BULL leg
+        # (anchor = swing LOW). The generic SHORT branches below are kept as
+        # defensive code but are unreachable after the bull-leg filter above.
         trade_dir = "LONG" if row["direction_bull"] else "SHORT"
 
         entry_price = float(row["close"])
@@ -525,10 +554,14 @@ def run_historical_backtest(symbols_data: Dict[str, pd.DataFrame],
                             target_pct: float = 4.0,
                             stop_pct: float = 2.0,
                             max_hold_days: int = 10,
-                            cooldown_bars: int = 3) -> BacktestResult:
+                            cooldown_bars: int = 0) -> BacktestResult:
     """
     Run complete historical backtest scanner across multiple stocks.
     Aggregates performance metrics, horizon stats, equity curve, and rankings.
+
+    LIVE-PARITY: signals are bull-side only (LONG trades on BULL legs, no
+    cooldown — see simulate_stock_touches). Touch counts reported in the
+    result also cover bull-leg rows only so they match the trade log.
     """
     period_norm = period.strip().lower().replace("yr", "y")
     period_labels = {
@@ -541,11 +574,11 @@ def run_historical_backtest(symbols_data: Dict[str, pd.DataFrame],
 
     touch_norm = touch_filter.strip().lower()
     if touch_norm in ("0.0", "0.0%", "0.0% touches"):
-        touch_title = "0.0% Touches (Swing Anchor)"
+        touch_title = "0.0% Touches (Swing Anchor, Bull-side LONG)"
     elif touch_norm in ("poc", "poc touches"):
-        touch_title = "POC Touches (Point of Control)"
+        touch_title = "POC Touches (Point of Control, Bull-side LONG)"
     else:
-        touch_title = "Both (0.0% & POC Touches)"
+        touch_title = "Both (0.0% & POC Touches, Bull-side LONG)"
 
     # Determine global date bounds
     all_dates = []
@@ -588,8 +621,11 @@ def run_historical_backtest(symbols_data: Dict[str, pd.DataFrame],
                 cooldown_bars=cooldown_bars,
             )
 
-            # Count touches within period
-            period_sub = scan_df[(scan_df.index >= start_date) & (scan_df.index <= end_date)]
+            # Count touches within period — BULL-LEG ROWS ONLY (live-parity),
+            # so published counts always agree with the bull-side trade log.
+            period_sub = scan_df[(scan_df.index >= start_date)
+                                 & (scan_df.index <= end_date)
+                                 & (scan_df["direction_bull"])]
             n_000 = int(period_sub["touch_000"].sum())
             n_poc = int(period_sub["touch_poc"].sum())
             total_touches_000 += n_000

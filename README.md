@@ -162,11 +162,19 @@ runs the Pine engine → Telegram alert per new touch → writes the report to t
 
 Scan historical performance across NSE stocks with exact TradingView Pine indicator logic:
 
+### Live-Scanner Parity (bull side only):
+The backtest replicates the live scanner (`scanner.py` + `engine.py`) exactly:
+- **Bull-side LONG only:** only bullish-leg signals (anchor = swing LOW support) are evaluated — every simulated trade is a LONG. Bear-leg SHORT simulation is excluded.
+- **Same signal rules:** 0.0% touch of the current *or* prior-bar drawn anchor (including flip bars), POC wick touch, zero-tolerance `low <= level <= high`, causal bar-by-bar engine.
+- **No trade cooldown:** the live scanner re-arms every trading day, so consecutive-day touches each produce a trade.
+- **5-year context:** the engine always runs on 5y of daily history like the live scanner's `--history 5y` default; trades/touches are reported only inside the selected period.
+- **Consistent counts:** all touch counts in CLI/PDF/web reports count bull-leg rows only, matching the trade log.
+
 ### Options Available:
 1. **Touch Condition (2 Core Options + Both):**
-   - `0.0% touches`: Price touches swing anchor level (swing LOW support in bull leg, swing HIGH resistance in bear leg, including prior-bar anchor rule).
+   - `0.0% touches`: Price touches the swing-anchor level (swing LOW support on a bull leg, including prior-bar anchor rule).
    - `poc touches`: Price wicks into the Volume Profile Point of Control line.
-   - `both`: Evaluates all qualifying touches.
+   - `both`: Evaluates all qualifying touches (bull side only).
 2. **Backtest Durations:**
    - `1yr` (1 year / ~252 trading days)
    - `2yr` (2 years / ~504 trading days)
