@@ -84,6 +84,15 @@ python scanner.py --mode once --telegram --summary
 
 # 3) LIVE loop during market hours 9:15–15:30 IST (polls every 5 min)
 python scanner.py --mode live --poll-sec 300
+
+# 4) Historical Backtest Scanner (CLI)
+# Options: --touch [0.0|poc|both] --period [1y|2y|3y|5y] --universe [nifty50|nifty100|full]
+python backtest_scanner.py --touch 0.0 --period 2y --universe nifty50
+python backtest_scanner.py --touch poc --period 3y --universe nifty50
+python backtest_scanner.py --touch both --period 5y --universe full
+
+# 5) Historical Backtest Interactive Web Dashboard
+python web_app.py   # open http://localhost:5000 in your browser
 ```
 
 Useful flags: `--min-price 100 --min-mcap-cr 1000 --limit N --no-refresh
@@ -149,6 +158,55 @@ runs the Pine engine → Telegram alert per new touch → writes the report to t
 
 ---
 
+## 3c. Historical Backtest Scanner & PDF Report Generator
+
+Scan historical performance across NSE stocks with exact TradingView Pine indicator logic:
+
+### Options Available:
+1. **Touch Condition (2 Core Options + Both):**
+   - `0.0% touches`: Price touches swing anchor level (swing LOW support in bull leg, swing HIGH resistance in bear leg, including prior-bar anchor rule).
+   - `poc touches`: Price wicks into the Volume Profile Point of Control line.
+   - `both`: Evaluates all qualifying touches.
+2. **Backtest Durations:**
+   - `1yr` (1 year / ~252 trading days)
+   - `2yr` (2 years / ~504 trading days)
+   - `3yr` (3 years / ~756 trading days)
+   - `5yr` (5 years / ~1260 trading days)
+3. **Stock Universes:**
+   - `nifty50`: Top 50 liquid Indian large caps.
+   - `nifty100`: Top 100 benchmark constituents.
+   - `full`: Full filtered NSE universe (>₹1,000 Cr market cap, price ≥ ₹100).
+   - Custom symbols: `--symbols RELIANCE,TCS,INFY,HDFCBANK`.
+4. **Institutional PDF Report:**
+   - Auto-generated upon run completion with executive KPI cards, 4-panel visual charts (Equity Curve, Forward Return Horizons, Return Distribution, 0.0% vs POC comparison), stock performance rankings, and trade event log.
+
+### CLI Examples:
+```bash
+# 2-year backtest on 0.0% touches for Nifty 50
+python backtest_scanner.py --touch 0.0 --period 2y --universe nifty50
+
+# 3-year backtest on POC touches for Nifty 50
+python backtest_scanner.py --touch poc --period 3y --universe nifty50
+
+# 5-year full universe backtest with custom PDF destination
+python backtest_scanner.py --touch both --period 5y --universe full --pdf reports/fibo_5y_report.pdf
+
+# Interactive terminal wizard
+python backtest_scanner.py --interactive
+```
+
+### Interactive Web Dashboard:
+```bash
+python web_app.py
+```
+Open `http://localhost:5000` (or the live preview in Arena) to:
+- Select touch options (0.0% touches, POC touches, Both) via radio buttons
+- Pick backtest period (1yr, 2yr, 3yr, 5yr) with 1 click
+- View live charts, stock rankings, and trade logs
+- 1-click Download PDF Report and in-browser preview
+
+---
+
 ## 4. Files
 
 | File | Purpose |
@@ -159,6 +217,12 @@ runs the Pine engine → Telegram alert per new touch → writes the report to t
 | `universe.py` | Full-NSE list + `MCAP > ₹1000cr`, `PRICE ≥ ₹100` filters (7-day mcap cache) |
 | `alerts.py` | Telegram send + the 2 alert message templates |
 | `backtest_verify.py` | 6 offline Pine-equivalence proofs (naive-loop VP, ATR, anchors, touch, history) |
+| `backtest_scanner.py` | Historical backtest scanner CLI with interactive prompts and formatted output |
+| `backtest_engine.py` | Fast causal historical scanner, trade simulation, horizon returns, metrics |
+| `data_manager.py` | Universe baskets (Nifty 50/100/full), data loader with resilient fallback |
+| `pdf_report.py` | Multi-page institutional PDF report generator (ReportLab + Matplotlib) |
+| `web_app.py` | Interactive web dashboard (Flask) on `0.0.0.0:5000` with live preview |
+| `test_backtest.py` | Unit and integration test suite verifying backtests and PDF compilation |
 | `nse_symbols.txt` | 520-symbol NSE seed list (auto-refreshed live from NSE/mirrors when reachable) |
 | `.github/workflows/live-scanner.yml` | Scheduled live scanner on GitHub Actions (NSE hours, every 15 min) |
 
