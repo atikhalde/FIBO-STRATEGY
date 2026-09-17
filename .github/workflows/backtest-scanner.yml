@@ -1,0 +1,243 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# backtest-scanner.yml — run the FIBO NSE HISTORICAL BACKTEST scanner
+# ══════════════════════════════════════════════════════════════════════════════
+# On demand (Actions → Backtest NSE scanner → Run workflow) or every Saturday:
+#   • verifies engine.py == Pine logic offline (backtest_verify.py gate)
+#   • builds the chosen universe (Nifty 50 / Nifty 100 / full NSE / custom list)
+#   • loads 1–5 years of daily history (disk cache restored between runs)
+#   • runs the causal historical backtest (0.0% and/or POC touches, trade sim)
+#   • generates the institutional PDF report and uploads it as an artifact
+#   • writes the full console report to the run Summary
+#
+# No secrets required — backtests never send Telegram alerts.
+#
+# GitHub runs schedules in UTC and only fires them from the DEFAULT branch, so
+# this file must be merged to main for the weekly run to activate:
+#   30 4 * * 6  →  Saturday 10:00 IST — weekly backtest refresh
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Backtest NSE scanner
+
+on:
+  schedule:
+    - cron: "30 4 * * 6"            # Saturday 10:00 IST — weekly refresh (main only)
+  workflow_dispatch:
+    inputs:
+      touch:
+        description: "Touch filter — 0.0% anchor touches, POC touches, or both"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - "both"
+          - "0.0%"
+          - "poc"
+      period:
+        description: "Backtest duration"
+        required: false
+        default: "2y"
+        type: choice
+        options:
+          - "1y"
+          - "2y"
+          - "3y"
+          - "5y"
+      universe:
+        description: "Stock universe (ignored when 'symbols' is set)"
+        required: false
+        default: "nifty50"
+        type: choice
+        options:
+          - nifty50
+          - nifty100
+          - full
+          - sample
+      symbols:
+        description: "Custom comma-separated symbols (e.g. RELIANCE,TCS,INFY) — overrides universe"
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: "Scan only the first N symbols of the universe (blank = all)"
+        required: false
+        default: ""
+        type: string
+      target_pct:
+        description: "Profit target % per trade"
+        required: false
+        default: "4.0"
+        type: string
+      stop_pct:
+        description: "Stop-loss % per trade"
+        required: false
+        default: "2.0"
+        type: string
+      max_hold:
+        description: "Maximum holding period (trading days)"
+        required: false
+        default: "10"
+        type: string
+      workers:
+        description: "Data-download threads (4–12)"
+        required: false
+        default: "8"
+        type: string
+      no_pdf:
+        description: "Skip PDF generation (console report only)"
+        required: false
+        default: false
+        type: boolean
+      refresh_data:
+        description: "Ignore the cached history and re-download everything"
+        required: false
+        default: false
+        type: boolean
+
+# Backtests are idempotent and monolithic — a newer run supersedes a stale one.
+concurrency:
+  group: backtest-nse-scanner
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Kolkata
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  backtest:
+    name: FIBO historical backtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # full-universe 5y runs download ~2000 histories
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Cheap offline gate (≈1 s, no network): refuse to burn a 60-minute
+      # backtest on an engine that no longer matches the Pine logic.
+      - name: Verify engine ≡ Pine logic (offline)
+        run: python backtest_verify.py
+
+      # Price history survives between runs (cache/history_cache), so a weekly
+      # nifty50 refresh downloads seconds of data instead of 50 full histories.
+      # Use refresh_data=true to force a clean re-download.
+      - name: Restore history cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/history_cache
+          key: fibo-backtest-history-${{ github.run_id }}
+          restore-keys: |
+            fibo-backtest-history-
+
+      - name: Run historical backtest
+        id: backtest
+        env:
+          TOUCH: ${{ inputs.touch || 'both' }}
+          PERIOD: ${{ inputs.period || '2y' }}
+          UNIVERSE: ${{ inputs.universe || 'nifty50' }}
+          SYMBOLS: ${{ inputs.symbols || '' }}
+          LIMIT: ${{ inputs.limit || '' }}
+          TARGET_PCT: ${{ inputs.target_pct || '4.0' }}
+          STOP_PCT: ${{ inputs.stop_pct || '2.0' }}
+          MAX_HOLD: ${{ inputs.max_hold || '10' }}
+          WORKERS: ${{ inputs.workers || '8' }}
+          NO_PDF: ${{ inputs.no_pdf || false }}
+          REFRESH_DATA: ${{ inputs.refresh_data || false }}
+        run: |
+          {
+            echo "### 📈 Backtest started $(date '+%d-%b-%Y %H:%M:%S %Z') (trigger: ${{ github.event_name }})"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---|---|"
+            echo "| Touch filter | \`$TOUCH\` |"
+            echo "| Period | \`$PERIOD\` |"
+            if [ -n "$SYMBOLS" ]; then
+              echo "| Universe | custom: \`$SYMBOLS\` |"
+            else
+              echo "| Universe | \`$UNIVERSE\`${LIMIT:+ (limit $LIMIT)} |"
+            fi
+            echo "| Strategy | target +\`$TARGET_PCT\`% / stop -\`$STOP_PCT\`% / max hold \`$MAX_HOLD\`d |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$REFRESH_DATA" = "true" ]; then
+            echo "refresh_data=true — clearing cached history"
+            rm -rf cache/history_cache
+          fi
+
+          mkdir -p reports
+          PDF_PATH="reports/fibo_backtest_${{ github.run_id }}.pdf"
+
+          ARGS=(--touch "$TOUCH" --period "$PERIOD"
+                --target-pct "$TARGET_PCT" --stop-pct "$STOP_PCT"
+                --max-hold "$MAX_HOLD" --workers "$WORKERS")
+          if [ -n "$SYMBOLS" ]; then
+            ARGS+=(--symbols "$SYMBOLS")
+          else
+            ARGS+=(--universe "$UNIVERSE")
+          fi
+          if [ -n "$LIMIT" ]; then
+            ARGS+=(--limit "$LIMIT")
+          fi
+          if [ "$NO_PDF" = "true" ]; then
+            ARGS+=(--no-pdf)
+          else
+            ARGS+=(--pdf "$PDF_PATH")
+          fi
+
+          echo "python backtest_scanner.py ${ARGS[*]}"
+          set -o pipefail
+          python backtest_scanner.py "${ARGS[@]}" 2>&1 | tee backtest_report.txt
+
+      # The CLI summary starts at the first ═ banner; fall back to the raw
+      # tail if the layout ever changes.
+      - name: Publish backtest report
+        if: ${{ always() }}
+        run: |
+          {
+            echo ""
+            echo "### 📊 Backtest result"
+            echo ""
+            echo '```text'
+            if [ -f backtest_report.txt ]; then
+              SUMMARY=$(awk '/^═/{found=1} found' backtest_report.txt)
+              if [ -n "$SUMMARY" ]; then
+                echo "$SUMMARY"
+              else
+                tail -n 80 backtest_report.txt
+              fi
+            else
+              echo "(no report produced — see the step log above)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fibo-backtest-${{ github.run_id }}
+          path: |
+            reports/*.pdf
+            backtest_report.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Save history cache
+        if: ${{ always() && steps.backtest.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: cache/history_cache
+          key: fibo-backtest-history-${{ github.run_id }}
