@@ -225,6 +225,7 @@ Open `http://localhost:5000` (or the live preview in Arena) to:
 | `test_backtest.py` | Unit and integration test suite verifying backtests and PDF compilation |
 | `nse_symbols.txt` | 520-symbol NSE seed list (auto-refreshed live from NSE/mirrors when reachable) |
 | `.github/workflows/live-scanner.yml` | Scheduled live scanner on GitHub Actions (NSE hours, every 15 min) |
+| `.github/workflows/backtest-scanner.yml` | On-demand + weekly historical backtest on GitHub Actions (PDF artifact, no secrets needed) |
 
 ---
 
