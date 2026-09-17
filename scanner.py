@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════════════
-# scanner.py — Live NSE scanner: 0.0% + POC touches → Telegram
+# scanner.py — Live NSE scanner: 0.0% + POC touches → Telegram (BULL SIDE ONLY)
 # ══════════════════════════════════════════════════════════════════════════════
 # Modes:
 #   python scanner.py --mode once   single EOD-style scan of last daily bar
@@ -18,6 +18,11 @@
 #   • Touch = low <= level <= high on that merged bar. Zero tolerance.
 #   • Dedup key: (symbol, level_type, swing_anchor_date) + once-per-day guard,
 #     so a touch spams you ONCE, and re-arms on a new swing or a new day.
+#   • BULL SIDE ONLY (anchor-aware): backtest parity fix — a 0.0% touch is
+#     bullish only if its ANCHOR's leg was bullish (current anchor → current
+#     direction, prev-bar anchor → prev direction). POC support is bullish
+#     only on a current bull leg. Every alert is a LONG signal; bear touches
+#     are skipped. See engine.py scan_last_bar for the flip-bar explanation.
 #
 # Config via environment (or config.env file — see config.example.env):
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -127,7 +132,14 @@ def evaluate(symbols: List[str], daily: Dict[str, pd.DataFrame],
              telegram: bool = False, token: str = "",
              chat: str = "", state: Optional[dict] = None,
              dry_run: bool = False) -> dict:
-    """Run engine + touch checks over the universe. Returns stats + hits."""
+    """Run engine + touch checks over the universe. Returns stats + hits.
+    BULL SIDE ONLY (anchor-aware, 100% parity with backtest_engine):
+      • 0.0% touch is bullish only if its anchor's leg was bullish
+        (current anchor → current direction_bull, prev anchor → prev_direction_bull)
+      • POC support is bullish only on a current bull leg.
+      Every 0.0% touch is a flip bar, so post-flip direction alone would
+      misclassify the signal; the anchor-aware check is required.
+    """
     state = state if state is not None else {}
     today = datetime.now(IST).date().isoformat()
     hits_000: List[tuple] = []
@@ -150,22 +162,26 @@ def evaluate(symbols: List[str], daily: Dict[str, pd.DataFrame],
             log.debug("%s: engine failed: %s", sym, e)
             continue
 
+        # ── anchor-aware bull filter (100% parity with backtest_engine) ──
+        is_000_bull = bool(res.get("touch_000_bull", res.get("touch_000") and res.get("direction_bull")))
+        is_poc_bull = bool(res.get("touch_poc_bull", res.get("touch_poc") and res.get("direction_bull")))
+
         anchor_key = res["swing_date_prev"] if res.get("touched_000") == "prev-bar" else res["swing_date"]
-        if res["touch_000"]:
+        if is_000_bull:
             if should_alert(state, sym, "000", anchor_key, today):
                 hits_000.append((sym, res))
                 msg = format_touch_000(sym, res)
-                log.info("🎯 %s touched 0.0%% @ %s", sym, res["level_000"])
+                log.info("🎯 %s touched 0.0%% (BULL) @ %s", sym, res["level_000"])
                 if telegram and not dry_run:
                     send_telegram(token, chat, msg)
                     time.sleep(0.4)  # Bot API rate kindness
             else:
                 seen_000.append((sym, res))
-        if res["touch_poc"]:
+        if is_poc_bull:
             if should_alert(state, sym, "POC", res["swing_date"], today):
                 hits_poc.append((sym, res))
                 msg = format_touch_poc(sym, res)
-                log.info("🔥 %s touched POC @ %s", sym, res["poc"])
+                log.info("🔥 %s touched POC (BULL) @ %s", sym, res["poc"])
                 if telegram and not dry_run:
                     send_telegram(token, chat, msg)
                     time.sleep(0.4)
@@ -178,15 +194,16 @@ def evaluate(symbols: List[str], daily: Dict[str, pd.DataFrame],
 
 
 def build_report(stats: dict) -> str:
-    """Render the scan report as text (same text for console, file and CI)."""
+    """Render the scan report as text (same text for console, file and CI).
+    BULL SIDE ONLY — all hits are anchor-aware bull touches (LONG signals)."""
     out: List[str] = []
     out.append("")
     out.append("=" * 72)
-    out.append(f"FIBO SCAN — {now_ist()} | universe={stats['n']} "
-               f"errors={stats['errors']}")
+    out.append(f"FIBO SCAN (BULL ONLY) — {now_ist()} | universe={stats['n']} "
+               f"errors={stats['errors']} | strategy=LONG on bull anchor support")
     out.append("=" * 72)
-    for title, hits, key in (("TOUCHED 0.0% (swing anchor)", stats["hits_000"], "level_000"),
-                             ("TOUCHED POC", stats["hits_poc"], "poc")):
+    for title, hits, key in (("TOUCHED 0.0% (BULL — swing LOW)", stats["hits_000"], "level_000"),
+                             ("TOUCHED POC (BULL — support)", stats["hits_poc"], "poc")):
         out.append(f"\n── {title}: {len(hits)} ──")
         for sym, r in hits:
             ld = r["last_date"].date() if r["last_date"] is not None else "?"

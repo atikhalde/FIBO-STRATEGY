@@ -297,11 +297,13 @@ def scan_last_bar(df: pd.DataFrame, symbol: str = "",
     # Anchor as it stood on the previous bar (yesterday's drawn 0.0% level).
     lvl000_prev: Optional[float] = None
     swing_date_prev = None
+    direction_bull_prev: Optional[bool] = None
     if len(df) >= 3:
         try:
             lv_prev = compute_pine_levels(df.iloc[:-1], swing_length=swing_length)
             lvl000_prev = _anchor_of(lv_prev)
             swing_date_prev = lv_prev.swing_date
+            direction_bull_prev = bool(lv_prev.direction_bull)
         except ValueError:
             pass
 
@@ -312,6 +314,21 @@ def scan_last_bar(df: pd.DataFrame, symbol: str = "",
         touch_prev = False
     touch000 = touch_cur or touch_prev
     touch_poc = is_touch(bh, bl, lv.poc_price)
+
+    # ── BULL-SIDE ONLY (anchor-aware): a touch is bullish only if the
+    # anchor's leg was bullish. For 0.0% this means checking the anchor's
+    # own leg direction: current anchor → current direction, prev anchor →
+    # prev direction. POC support is bullish only on a current bull leg.
+    # This is critical because every 0.0% touch is a flip bar (touch flips
+    # direction on the same bar); filtering on post-flip direction alone
+    # would exclude 80%+ of true bull touches and include bear touches that
+    # flipped to bull.
+    touch_000_bull = bool(
+        (touch_cur and lv.direction_bull) or
+        (touch_prev and direction_bull_prev is True)
+    )
+    touch_poc_bull = bool(touch_poc and lv.direction_bull)
+    touch_any_bull = bool(touch_000_bull or touch_poc_bull)
 
     def _dist_pct(price: float, level: Optional[float]) -> Optional[float]:
         if level is None or level == 0 or price is None:
@@ -324,11 +341,14 @@ def scan_last_bar(df: pd.DataFrame, symbol: str = "",
         "close": bc, "high": bh, "low": bl,
         "direction": "BULL-LEG (anchor=swing LOW)" if lv.direction_bull else "BEAR-LEG (anchor=swing HIGH)",
         "direction_bull": lv.direction_bull,
+        "direction_bull_prev": direction_bull_prev,
         "level_000": lvl000,
         "swing_date": lv.swing_date,
         "level_000_prev": lvl000_prev,
         "swing_date_prev": swing_date_prev,
         "touched_000": ("current" if touch_cur else ("prev-bar" if touch_prev else None)),
+        "touch_000_cur": touch_cur,
+        "touch_000_prev": touch_prev,
         "poc": lv.poc_price,
         "poc_vol": lv.poc_vol,
         "vp_rows": lv.vp_rows,
@@ -337,6 +357,9 @@ def scan_last_bar(df: pd.DataFrame, symbol: str = "",
         "n_bars": lv.n_bars,
         "touch_000": touch000,
         "touch_poc": touch_poc,
+        "touch_000_bull": touch_000_bull,
+        "touch_poc_bull": touch_poc_bull,
+        "touch_any_bull": touch_any_bull,
         "dist_000_pct": _dist_pct(bc, lvl000),
         "dist_poc_pct": _dist_pct(bc, lv.poc_price),
     }
@@ -349,11 +372,14 @@ def historical_touches(df: pd.DataFrame, symbol: str = "",
     Backtest-style: for every bar j, compute levels as Pine would show with
     `islast==j`, and record whether bar j touches them. Causal (prefix slices).
     O(n²)-ish — use on a few hundred bars for verification/backtests only.
+    Bull-aware columns (touch_*_bull) use anchor-aware filtering identical to
+    scan_last_bar: a 0.0% touch is bullish only if its anchor's leg was bullish.
     """
     n = len(df)
     j0 = 1 if start is None else max(1, start)  # bar 0 alone can never hold a swing
     rows = []
     prev_anchor: Optional[float] = None
+    prev_dir_bull: Optional[bool] = None
     for j in range(j0, n):
         sub = df.iloc[:j + 1]
         try:
@@ -365,7 +391,15 @@ def historical_touches(df: pd.DataFrame, symbol: str = "",
         lvl000 = _anchor_of(lv)
         # Prior-bar anchor rule (see scan_last_bar): touch counts against the
         # anchor that was drawn BEFORE bar j, as well as the post-bar anchor.
-        t000 = is_touch(bh, bl, lvl000) or is_touch(bh, bl, prev_anchor)
+        t_cur = is_touch(bh, bl, lvl000)
+        t_prev = is_touch(bh, bl, prev_anchor) if prev_anchor is not None else False
+        if t_cur and t_prev and lvl000 == prev_anchor:
+            t_prev = False
+        t000 = t_cur or t_prev
+        t_poc = is_touch(bh, bl, lv.poc_price)
+        # anchor-aware bull flags
+        t000_bull = bool((t_cur and lv.direction_bull) or (t_prev and prev_dir_bull is True))
+        t_poc_bull = bool(t_poc and lv.direction_bull)
         rows.append({
             "date": sub.index[-1],
             "close": float(sub["close"].iloc[-1]),
@@ -373,8 +407,16 @@ def historical_touches(df: pd.DataFrame, symbol: str = "",
             "swing_price_prev": prev_anchor,
             "swing_date": lv.swing_date,
             "poc": lv.poc_price,
+            "direction_bull": bool(lv.direction_bull),
+            "direction_bull_prev": prev_dir_bull,
+            "touch_000_cur": t_cur,
+            "touch_000_prev": t_prev,
             "touch_000": t000,
-            "touch_poc": is_touch(bh, bl, lv.poc_price),
+            "touch_000_bull": t000_bull,
+            "touch_poc": t_poc,
+            "touch_poc_bull": t_poc_bull,
+            "touch_any_bull": bool(t000_bull or t_poc_bull),
         })
         prev_anchor = lvl000
+        prev_dir_bull = bool(lv.direction_bull)
     return pd.DataFrame(rows)

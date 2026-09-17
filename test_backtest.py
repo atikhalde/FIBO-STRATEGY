@@ -28,13 +28,16 @@ class TestFiboBacktest(unittest.TestCase):
         cls.test_data = {"RELIANCE": cls.df_rel, "TCS": cls.df_tcs}
 
     def test_fast_scan_equivalence_and_columns(self):
-        """Verify that fast_scan_symbol_history returns valid Pine indicator columns."""
+        """Verify that fast_scan_symbol_history returns valid Pine indicator columns
+        including anchor-aware bull flags (100% parity with engine.scan_last_bar)."""
         scan_df = fast_scan_symbol_history(self.df_rel, symbol="RELIANCE")
         self.assertFalse(scan_df.empty)
         required_cols = [
             "open", "high", "low", "close", "volume",
-            "direction_bull", "swing_price", "swing_price_prev",
-            "poc", "touch_000", "touch_poc"
+            "direction_bull", "prev_direction_bull",
+            "swing_price", "swing_price_prev",
+            "poc", "touch_000", "touch_000_cur", "touch_000_prev",
+            "touch_000_bull", "touch_poc", "touch_poc_bull", "touch_any_bull"
         ]
         for col in required_cols:
             self.assertIn(col, scan_df.columns, f"Missing required column: {col}")
@@ -57,11 +60,15 @@ class TestFiboBacktest(unittest.TestCase):
         self.assertEqual(res_both.total_touches, res_both.touches_000 + res_both.touches_poc)
 
     def test_bull_side_only(self):
-        """LIVE-PARITY: only BULL-leg signals — every trade LONG on a BULL leg,
-        no bear-leg trades, and touch counts cover bull-leg rows only."""
+        """LIVE-PARITY (anchor-aware): only BULL-anchor signals — every trade LONG
+        on a bull swing LOW (or POC support on a bull leg). 0.0% bull touches
+        are anchor-aware (prev vs current), because every 0.0% touch flips the
+        leg on the same bar; filtering on post-flip direction_bull alone would
+        misclassify 80%+ of true bull touches. Touch counts cover anchor-aware
+        bull rows only, 100% parity with live scanner."""
         res = run_historical_backtest(self.test_data, touch_filter="both", period="2y")
 
-        # 1) Every simulated trade is a LONG trade on a BULL swing leg
+        # 1) Every simulated trade is a LONG trade on a BULL anchor / bull leg
         self.assertGreater(len(res.trade_log), 0)
         for t in res.trade_log:
             self.assertEqual(t.trade_direction, "LONG",
@@ -69,25 +76,43 @@ class TestFiboBacktest(unittest.TestCase):
             self.assertEqual(t.swing_direction, "BULL",
                              f"non-bull-leg trade leaked into backtest: {t}")
 
-        # 2) Every trade's entry bar really is a bull-leg touch bar in the scan
+        # 2) Every trade's entry bar really is an anchor-aware bull touch bar
         start = max(df.index.max() for df in self.test_data.values()) - pd.DateOffset(years=2)
         for t in res.trade_log:
             scan_df = fast_scan_symbol_history(self.test_data[t.symbol], symbol=t.symbol)
             row = scan_df.loc[pd.Timestamp(t.entry_date)]
-            self.assertTrue(bool(row["direction_bull"]),
-                            f"{t.symbol} {t.entry_date}: entry bar is not a bull leg")
+            # Anchor-aware: 0.0% bull = (cur touch & cur bull) or (prev touch & prev bull)
+            is_bull_touch = bool(row["touch_000_bull"]) or bool(row["touch_poc_bull"])
+            self.assertTrue(is_bull_touch,
+                            f"{t.symbol} {t.entry_date}: entry bar is not an anchor-aware bull touch "
+                            f"(touch_000_bull={row['touch_000_bull']}, touch_poc_bull={row['touch_poc_bull']})")
+            # Also verify raw touch exists
             self.assertTrue(bool(row["touch_000"]) or bool(row["touch_poc"]),
-                            f"{t.symbol} {t.entry_date}: entry bar has no touch")
+                            f"{t.symbol} {t.entry_date}: entry bar has no raw touch")
 
-        # 3) Reported touch counts equal bull-leg touch rows in the window
+        # 3) Reported touch counts equal anchor-aware bull touch rows in window
         exp_000 = exp_poc = 0
         for df in self.test_data.values():
             scan_df = fast_scan_symbol_history(df)
-            sub = scan_df[(scan_df.index >= start) & (scan_df["direction_bull"])]
-            exp_000 += int(sub["touch_000"].sum())
-            exp_poc += int(sub["touch_poc"].sum())
-        self.assertEqual(res.touches_000, exp_000)
-        self.assertEqual(res.touches_poc, exp_poc)
+            mask = scan_df.index >= start
+            exp_000 += int(scan_df.loc[mask, "touch_000_bull"].sum())
+            exp_poc += int(scan_df.loc[mask, "touch_poc_bull"].sum())
+        self.assertEqual(res.touches_000, exp_000,
+                         f"touches_000 mismatch: reported {res.touches_000} vs anchor-aware {exp_000}")
+        self.assertEqual(res.touches_poc, exp_poc,
+                         f"touches_poc mismatch: reported {res.touches_poc} vs anchor-aware {exp_poc}")
+
+        # 4) Cross-check with engine.scan_last_bar's bull flags (0 mismatches)
+        from engine import scan_last_bar
+        for sym, df in self.test_data.items():
+            scan_df = fast_scan_symbol_history(df, symbol=sym)
+            for date, row in scan_df[scan_df.index >= start].iterrows():
+                sub = df.loc[:date]
+                eng = scan_last_bar(sub, symbol=sym)
+                self.assertEqual(bool(row["touch_000_bull"]), bool(eng["touch_000_bull"]),
+                                 f"{sym} {date.date()}: touch_000_bull mismatch fast={row['touch_000_bull']} eng={eng['touch_000_bull']}")
+                self.assertEqual(bool(row["touch_poc_bull"]), bool(eng["touch_poc_bull"]),
+                                 f"{sym} {date.date()}: touch_poc_bull mismatch")
 
     def test_no_cooldown_consecutive_touches(self):
         """LIVE-PARITY: no trade cooldown — consecutive-day touches each
@@ -97,14 +122,19 @@ class TestFiboBacktest(unittest.TestCase):
         base = np.full(n, 100.0)
         touch = np.zeros(n, dtype=bool)
         touch[10] = touch[11] = True   # two consecutive touch days
+        # Anchor-aware bull flags: direction_bull True for all, so all touches are bull
         scan_df = pd.DataFrame({
             "open": base, "high": base + 5.0, "low": base - 5.0,
             "close": base + np.linspace(0, 1.0, n),  # drift up → target hits
             "volume": base,
             "direction_bull": np.ones(n, dtype=bool),
+            "prev_direction_bull": np.ones(n, dtype=bool),
             "swing_price": base, "swing_price_prev": base,
             "swing_date": idx, "poc": base,
-            "touch_000": touch, "touch_poc": np.zeros(n, dtype=bool),
+            "touch_000": touch,
+            "touch_000_cur": touch, "touch_000_prev": np.zeros(n, dtype=bool),
+            "touch_000_bull": touch, "touch_poc": np.zeros(n, dtype=bool),
+            "touch_poc_bull": np.zeros(n, dtype=bool), "touch_any_bull": touch,
         }, index=idx)
 
         trades, events = simulate_stock_touches(scan_df, "SYNTH",
