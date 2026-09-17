@@ -577,7 +577,9 @@ def build_pdf_report(res: BacktestResult, output_path: Path | str) -> Path:
         "1. <b>Zero Tolerance Wick Containment:</b> A touch requires exact containment <code>low ≤ level ≤ high</code> with zero tolerance. "
         "2. <b>Prior-Bar Anchor Rule:</b> Retest of swing anchor (0.0% level) automatically flips swing direction; scanner tests both current and yesterday's drawn anchor. "
         "3. <b>Volume Profile:</b> Exact replica of TradingView 100-bin triangular distribution from swing anchor to current bar. "
-        "4. <b>Disclaimer:</b> Educational and quantitative research report. Past performance does not guarantee future results. Verify on TradingView chart before executing.",
+        "4. <b>Bull-Side Only (Live-Scanner Rules):</b> Only bullish-leg signals (anchor = swing LOW) are evaluated and simulated as LONG trades — identical "
+        "to the live scanner. Bear-leg SHORT simulation is excluded; no trade cooldown (live re-arms each trading day); engine runs on 5y of daily context. "
+        "5. <b>Disclaimer:</b> Educational and quantitative research report. Past performance does not guarantee future results. Verify on TradingView chart before executing.",
         ParagraphStyle("DiscStyle", fontName="Helvetica", fontSize=6.5, leading=8.5, textColor=C_SLATE)
     ))
 

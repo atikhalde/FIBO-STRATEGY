@@ -202,13 +202,16 @@ def load_symbol_history(symbol: str, period_years: int = 5,
         except Exception as e:
             log.debug("Cache read failed for %s: %s", symbol, e)
 
-    # Attempt Yahoo Finance fetch only if reachable
+    # Attempt Yahoo Finance fetch only if reachable.
+    # NOTE: fetch EXACTLY period_years (no +1 buffer) so the engine frame is
+    # identical to the live scanner's (--history 5y default): same bars → same
+    # Wilder-ATR RMA seed position → same swing state → identical signals.
     df_yf = None
     if is_yahoo_reachable():
         yf_symbol = to_yahoo(clean_sym)
         try:
             from datafeed import fetch_daily_batch
-            data = fetch_daily_batch([yf_symbol], period=f"{period_years + 1}y", max_workers=1)
+            data = fetch_daily_batch([yf_symbol], period=f"{period_years}y", max_workers=1)
             res = data.get(yf_symbol)
             if res is not None and len(res) >= 100:
                 df_yf = res

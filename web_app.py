@@ -148,6 +148,10 @@ HTML_TEMPLATE = """
               </div>
             </label>
           </div>
+          <div class="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-400/90">
+            <i class="fa-solid fa-arrow-trend-up"></i>
+            <span>Bull-side LONG only — signals &amp; rules identical to the live scanner (no cooldown, 5y context)</span>
+          </div>
         </div>
 
         <!-- 2) PERIOD SELECTION -->
@@ -746,12 +750,12 @@ def api_run_backtest():
     if not symbols:
         return jsonify({"status": "error", "message": "No symbols available to scan."}), 400
 
-    years_map = {"1y": 1, "2y": 2, "3y": 3, "5y": 5}
     period_clean = period.lower().replace("yr", "y")
-    period_years = years_map.get(period_clean, 2)
 
-    # Load data
-    sym_data = load_batch_history(symbols, period_years=period_years, max_workers=4)
+    # LIVE-PARITY: always load 5y of daily context like the live scanner
+    # (--history 5y default); the analysis window is enforced by the period
+    # argument passed to run_historical_backtest.
+    sym_data = load_batch_history(symbols, period_years=5, max_workers=4)
 
     # Run backtest
     res = run_historical_backtest(
@@ -792,9 +796,9 @@ def api_initial_data():
             "pdf_filename": CURRENT_STATE["pdf_filename"],
         })
 
-    # Generate initial default 2y Nifty 50 backtest
+    # Generate initial default 2y Nifty 50 backtest (5y context, live-parity)
     syms = get_universe_symbols("nifty50", limit=10)
-    data = load_batch_history(syms, period_years=2, max_workers=4)
+    data = load_batch_history(syms, period_years=5, max_workers=4)
     res = run_historical_backtest(data, touch_filter="both", period="2y", universe_name="Nifty 50 Universe")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

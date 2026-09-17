@@ -40,7 +40,7 @@ def print_cli_summary(res: BacktestResult, pdf_path: Optional[Path] = None):
     print(f"  Period:       {res.period_label} ({res.start_date} → {res.end_date})")
     print(f"  Touch Filter: {res.touch_filter}")
     print(f"  Universe:     {res.universe_name} ({res.total_symbols_scanned} symbols scanned, {res.symbols_with_touches} with touches)")
-    print(f"  Strategy:     Target: +{res.target_pct:.1f}% | Stop-Loss: -{res.stop_pct:.1f}% (1:2 R:R) | Max Hold: {res.max_hold_days} days")
+    print(f"  Strategy:     BULL-SIDE LONG ONLY (live-scanner rules) | Target: +{res.target_pct:.1f}% | Stop-Loss: -{res.stop_pct:.1f}% (1:2 R:R) | Max Hold: {res.max_hold_days} days")
     print("─" * 76)
 
     # Key Performance Metrics
@@ -216,12 +216,12 @@ def main(argv=None) -> int:
     log.info("Option 2: Period = %s (%s)", period_norm, {"1y": "1 Year", "2y": "2 Years", "3y": "3 Years", "5y": "5 Years"}.get(period_norm))
     log.info("Universe: %s (%d symbols)", universe_label, len(symbols))
 
-    # Determine period years for data loading
-    years_map = {"1y": 1, "2y": 2, "3y": 3, "5y": 5}
-    period_years = years_map.get(period_norm, 1)
-
-    print(f"\n⚡ Loading historical data for {len(symbols)} symbols...")
-    data = load_batch_history(symbols, period_years=period_years, max_workers=args.workers)
+    # LIVE-PARITY: the live scanner always runs the engine on 5y of daily
+    # history (--history 5y default), so the backtest loads the same 5-year
+    # context for every period choice. Trades/touches are still restricted to
+    # the selected analysis window by run_historical_backtest.
+    print(f"\n⚡ Loading historical data for {len(symbols)} symbols (5y context, live-parity)...")
+    data = load_batch_history(symbols, period_years=5, max_workers=args.workers)
     if not data:
         log.error("Failed to load historical data for symbols.")
         return 1
