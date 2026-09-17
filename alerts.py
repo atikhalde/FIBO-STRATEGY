@@ -52,7 +52,7 @@ def _links(symbol_ns: str) -> str:
 
 
 def format_touch_000(symbol_ns: str, res: dict) -> str:
-    """ALERT 1 — price touched the 0.0% (swing anchor, BULL side LONG)."""
+    """ALERT 1 — price touched the 0.0% (swing anchor) level."""
     s = html.escape(symbol_ns.replace(".NS", ""))
     which = res.get("touched_000") or "current"
     if which == "prev-bar":
@@ -62,11 +62,11 @@ def format_touch_000(symbol_ns: str, res: dict) -> str:
         lvl, sdt = res.get("level_000"), res.get("swing_date")
         tag = ""
     return (
-        f"🎯 <b>{s} — TOUCHED 0.0% LEVEL (BULL — LONG)</b>{tag}\n"
+        f"🎯 <b>{s} — TOUCHED 0.0% LEVEL</b>{tag}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📌 0.0% (swing anchor, BULL LOW support): <b>{_fmt(lvl)}</b>\n"
+        f"📌 0.0% (swing anchor): <b>{_fmt(lvl)}</b>\n"
         f"💰 CMP: <b>{_fmt(res['close'])}</b>  (H {_fmt(res['high'])} / L {_fmt(res['low'])})\n"
-        f"📐 Leg: {html.escape(res['direction'])}  → LONG signal\n"
+        f"📐 Leg: {html.escape(res['direction'])}\n"
         f"🕰️ Swing date: {sdt.date() if sdt is not None else '—'}\n"
         f"📊 Bar: {res['last_date'].date() if res['last_date'] is not None else '—'} (Daily)\n"
         f"⏰ {now_ist()}\n"
@@ -75,14 +75,14 @@ def format_touch_000(symbol_ns: str, res: dict) -> str:
 
 
 def format_touch_poc(symbol_ns: str, res: dict) -> str:
-    """ALERT 2 — price touched the POC level (BULL side LONG)."""
+    """ALERT 2 — price touched the POC level."""
     s = html.escape(symbol_ns.replace(".NS", ""))
     return (
-        f"🔥 <b>{s} — TOUCHED POC LEVEL (BULL — LONG)</b>\n"
+        f"🔥 <b>{s} — TOUCHED POC LEVEL</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📌 POC (BULL support): <b>{_fmt(res['poc'])}</b>\n"
+        f"📌 POC: <b>{_fmt(res['poc'])}</b>\n"
         f"💰 CMP: <b>{_fmt(res['close'])}</b>  (H {_fmt(res['high'])} / L {_fmt(res['low'])})\n"
-        f"📐 Leg: {html.escape(res['direction'])}  → LONG signal\n"
+        f"📐 Leg: {html.escape(res['direction'])}\n"
         f"🎯 0.0% ref: {_fmt(res['level_000'])}\n"
         f"📊 VP range: {_fmt(res['vp_pmin'])} – {_fmt(res['vp_pmax'])} ({res['vp_rows'] or '—'} rows)\n"
         f"📊 Bar: {res['last_date'].date() if res['last_date'] is not None else '—'} (Daily)\n"
@@ -92,6 +92,6 @@ def format_touch_poc(symbol_ns: str, res: dict) -> str:
 
 
 def format_scan_summary(n_syms: int, n_000: int, n_poc: int, errors: int) -> str:
-    return (f"🤖 <b>FIBO scan (BULL ONLY) complete</b> — {now_ist()}\n"
-            f"Universe: <b>{n_syms}</b> | 0.0% bull touches: <b>{n_000}</b> | "
-            f"POC bull touches: <b>{n_poc}</b> | LONG signals only | errors: {errors}")
+    return (f"🤖 <b>FIBO scan complete</b> — {now_ist()}\n"
+            f"Universe: <b>{n_syms}</b> | 0.0% touches: <b>{n_000}</b> | "
+            f"POC touches: <b>{n_poc}</b> | errors: {errors}")
